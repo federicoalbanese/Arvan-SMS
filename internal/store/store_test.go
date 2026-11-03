@@ -224,6 +224,68 @@ func TestDispatchFlow(t *testing.T) {
 	assertLedger(t, s, c.ID, 800)
 }
 
+// Regression test: a worker pops an id from Redis while the relay that
+// published it has not committed yet. The claim must wait for the relay and
+// then succeed, instead of missing the row and dropping the id.
+func TestClaimWaitsForRelayCommit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	c := newCustomer(t, s, 1000)
+	accepted, _, err := s.AcceptMessages(ctx, c.ID, []sms.NewMessage{{To: "+989120000001", Text: "otp", Express: true, Cost: 100}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := accepted[0].ID
+
+	claimed := make(chan []sms.Message, 1)
+	for {
+		n, err := s.DispatchPending(ctx, true, 1000, func(_ context.Context, items []sms.QueueItem) error {
+			for _, it := range items {
+				if it.ID == id {
+					// Claim while the relay transaction is still open.
+					go func() {
+						msgs, _ := s.ClaimForSending(ctx, []int64{id})
+						claimed <- msgs
+					}()
+					time.Sleep(50 * time.Millisecond) // let the claim reach the row lock
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+
+	select {
+	case msgs := <-claimed:
+		if len(msgs) != 1 || msgs[0].Status != sms.StatusSending {
+			t.Fatalf("claim during relay returned %+v, want the message in sending", msgs)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("claim never returned")
+	}
+}
+
+func TestClaimRespectsRetryBackoff(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	c := newCustomer(t, s, 1000)
+	accepted, _, _ := s.AcceptMessages(ctx, c.ID, []sms.NewMessage{msg(1)})
+	id := accepted[0].ID
+	queueAll(t, s)
+	_, _ = s.ClaimForSending(ctx, []int64{id})
+	_ = s.FinishSending(ctx, []sms.SendOutcome{{MessageID: id, Attempt: 1, Kind: sms.OutcomeRetry, RetryAt: time.Now().Add(time.Hour)}})
+
+	// A stale duplicate of the id must not bypass the retry delay.
+	if got, _ := s.ClaimForSending(ctx, []int64{id}); len(got) != 0 {
+		t.Fatalf("claimed a message that is waiting for its retry time")
+	}
+}
+
 func TestFinishIgnoresStaleAttempt(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

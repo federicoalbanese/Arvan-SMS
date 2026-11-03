@@ -63,14 +63,22 @@ func (s *Store) DispatchPending(ctx context.Context, express bool, limit int,
 	return n, err
 }
 
-// ClaimForSending moves queued messages to sending and returns them. Only
-// rows that are still queued are claimed, so an id that was delivered twice
-// by Redis is sent only once. attempts is incremented here and acts as a
-// fencing token for FinishSending.
+// ClaimForSending moves messages to sending and returns them. A message is
+// claimed at most once, so an id that Redis delivered twice is sent once.
+// attempts is incremented here and acts as a fencing token for FinishSending.
+//
+// Why "pending" is accepted too: the relay publishes to Redis *before* its
+// transaction commits, so a fast worker can pop an id while the committed
+// row still says pending. Matching pending rows makes Postgres wait for the
+// relay's row lock and then re-check the row: after the commit it is
+// queued and gets claimed. Without this, the id would be dropped and the
+// message would stay queued forever. Pending rows waiting for a retry
+// (next_attempt_at in the future) are not claimable, so backoff is kept.
 func (s *Store) ClaimForSending(ctx context.Context, ids []int64) ([]sms.Message, error) {
 	rows, err := s.pool.Query(ctx, `
 		UPDATE messages SET status = 'sending', attempts = attempts + 1, updated_at = now()
-		WHERE id = ANY($1) AND status = 'queued'
+		WHERE id = ANY($1)
+		  AND (status = 'queued' OR (status = 'pending' AND next_attempt_at <= now()))
 		RETURNING `+messageColumns, ids)
 	if err != nil {
 		return nil, err
