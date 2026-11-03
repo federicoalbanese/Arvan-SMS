@@ -43,6 +43,7 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 	}
 
 	status, code, retryAfter := http.StatusInternalServerError, "internal_error", ""
+	message := err.Error()
 	switch {
 	case errors.Is(err, sms.ErrCustomerNotFound):
 		status, code = http.StatusNotFound, "customer_not_found"
@@ -58,9 +59,10 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, retryAfter = http.StatusServiceUnavailable, "express_overloaded", "1"
 	case errors.Is(err, sms.ErrExpressUnavailable):
 		status, code, retryAfter = http.StatusServiceUnavailable, "express_unavailable", "5"
+		h.log.Warn("express lane unavailable", "error", err)
+		message = sms.ErrExpressUnavailable.Error() // the wrapped cause (e.g. a Redis address) is internal
 	}
 
-	message := err.Error()
 	if status == http.StatusInternalServerError {
 		h.log.Error("request failed", "path", r.URL.Path, "error", err)
 		message = "internal server error" // do not leak internals

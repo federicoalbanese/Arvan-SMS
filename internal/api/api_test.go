@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -142,9 +143,14 @@ func TestErrorMapping(t *testing.T) {
 }
 
 func TestInternalErrorsAreNotLeaked(t *testing.T) {
-	rec := do(t, &stubService{sendErr: errors.New("password=secret")}, "POST", "/v1/customers/1/messages", `{"to":"x","text":"y"}`)
-	if strings.Contains(rec.Body.String(), "secret") {
-		t.Fatalf("internal error leaked: %s", rec.Body)
+	for _, err := range []error{
+		errors.New("password=secret"),
+		fmt.Errorf("%w: dial tcp secret-redis:6379", sms.ErrExpressUnavailable),
+	} {
+		rec := do(t, &stubService{sendErr: err}, "POST", "/v1/customers/1/messages", `{"to":"x","text":"y"}`)
+		if strings.Contains(rec.Body.String(), "secret") {
+			t.Fatalf("internal error leaked: %s", rec.Body)
+		}
 	}
 }
 
