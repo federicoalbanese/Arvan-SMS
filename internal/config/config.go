@@ -39,7 +39,9 @@ type Config struct {
 	// Worker pools and dispatching.
 	ExpressWorkers       int
 	NormalWorkers        int
-	FairQuantum          int // messages taken from one customer per round-robin turn
+	ExpressPollInterval  time.Duration // sender wait when the express queue is empty
+	NormalPollInterval   time.Duration // sender wait when the normal queue is empty
+	FairQuantum          int           // messages taken from one customer per round-robin turn
 	RelayBatchSize       int
 	RelayExpressInterval time.Duration
 	RelayNormalInterval  time.Duration
@@ -75,6 +77,8 @@ func Load() (Config, error) {
 
 		ExpressWorkers:       l.int("EXPRESS_WORKERS", 20),
 		NormalWorkers:        l.int("NORMAL_WORKERS", 50),
+		ExpressPollInterval:  l.duration("EXPRESS_POLL_INTERVAL", 10*time.Millisecond),
+		NormalPollInterval:   l.duration("NORMAL_POLL_INTERVAL", 100*time.Millisecond),
 		FairQuantum:          l.int("FAIR_QUANTUM", 10),
 		RelayBatchSize:       l.int("RELAY_BATCH_SIZE", 500),
 		RelayExpressInterval: l.duration("RELAY_EXPRESS_INTERVAL", 20*time.Millisecond),
