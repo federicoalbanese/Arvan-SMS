@@ -54,34 +54,20 @@ Consequences:
 ## 3. Overview
 
 ```mermaid
-flowchart LR
-    C[Customer] -- REST --> API
-
-    subgraph Gateway
-      API[API<br/>stateless]
-      PG[(PostgreSQL<br/>balances, ledger,<br/>messages = outbox)]
-      R[(Redis<br/>dispatch queues)]
-      subgraph Worker["Worker (N instances)"]
-        RL[Relay]
-        SE[Express senders]
-        SN[Normal senders]
-        RC[Reconciler]
-      end
-    end
-
-    OP[Mobile operator]
-
-    API -- "1 debit + insert<br/>(one transaction)" --> PG
-    API -. "express admission<br/>(read only)" .-> R
-    RL -- "2 read pending" --> PG
-    RL -- "3 publish ids" --> R
-    SE -- "4 pop" --> R
-    SN -- "4 pop (round-robin)" --> R
-    SE & SN -- "5 claim, 7 save result" --> PG
-    SE & SN -- "6 hand over" --> OP
-    RC -. repair .-> PG
-    RC -. repair .-> R
+flowchart TB
+    C[Customer] -- "REST" --> API["API (stateless)"]
+    API -- "(1) store message + debit balance<br/>one transaction" --> PG[("PostgreSQL<br/>balances, ledger,<br/>messages = outbox")]
+    API -. "express admission<br/>(read only)" .-> R[("Redis<br/>dispatch queues")]
+    PG -- "(2) pending messages" --> RL[Relay]
+    RL -- "(3) publish ids" --> R
+    R -- "(4) pop: express FIFO /<br/>normal round-robin" --> S["Senders<br/>express pool | normal pool"]
+    S -- "(5) claim, (7) save result / refund" --> PG
+    S -- "(6) hand over" --> OP[Mobile operator]
+    RC[Reconciler] -. "repair stuck messages" .-> PG
+    RC -. "rebuild after restart" .-> R
 ```
+
+Relay, senders and reconciler all run inside the worker process.
 
 **Two processes**, both stateless, both can run many copies:
 
