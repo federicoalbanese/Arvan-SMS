@@ -308,20 +308,36 @@ func TestListMessagesPagination(t *testing.T) {
 	}
 }
 
-func TestSwapState(t *testing.T) {
+func TestSyncRedisInstance(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
-	key := "test:" + t.Name() + time.Now().String()
+	c := newCustomer(t, s, 1000)
+	accepted, _, _ := s.AcceptMessages(ctx, c.ID, []sms.NewMessage{msg(1)})
+	queueAll(t, s)
 
-	for i, want := range []bool{true, false, true} {
-		value := "a"
-		if i == 2 {
-			value = "b"
-		}
-		changed, err := s.SwapState(ctx, key, value)
-		if err != nil || changed != want {
-			t.Fatalf("step %d: changed=%v err=%v, want %v", i, changed, err, want)
-		}
+	first := "run-" + time.Now().String()
+	if _, changed, err := s.SyncRedisInstance(ctx, first); err != nil || !changed {
+		t.Fatalf("new run id: changed=%v err=%v", changed, err)
+	}
+	queueAll(t, s)
+
+	// Same Redis instance: nothing to do.
+	if _, changed, _ := s.SyncRedisInstance(ctx, first); changed {
+		t.Fatal("same run id reported as changed")
+	}
+	m, _ := s.GetMessage(ctx, c.ID, accepted[0].ID)
+	if m.Status != sms.StatusQueued {
+		t.Fatalf("status = %s, want queued", m.Status)
+	}
+
+	// Redis restarted: queued messages go back to pending.
+	requeued, changed, err := s.SyncRedisInstance(ctx, first+"-restarted")
+	if err != nil || !changed || requeued < 1 {
+		t.Fatalf("restart: requeued=%d changed=%v err=%v", requeued, changed, err)
+	}
+	m, _ = s.GetMessage(ctx, c.ID, accepted[0].ID)
+	if m.Status != sms.StatusPending {
+		t.Fatalf("status = %s, want pending", m.Status)
 	}
 }
 

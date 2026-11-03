@@ -219,13 +219,31 @@ func (s *Store) RequeueQueued(ctx context.Context, ids []int64) (int64, error) {
 	return tag.RowsAffected(), err
 }
 
-// RequeueAllQueued puts every queued message back to pending. Used after
-// Redis restarted and its queues can no longer be trusted.
-func (s *Store) RequeueAllQueued(ctx context.Context) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE messages SET status = 'pending', next_attempt_at = now(), updated_at = now()
-		WHERE status = 'queued'`)
-	return tag.RowsAffected(), err
+// SyncRedisInstance records the run id of the Redis instance the workers
+// use. If it differs from the stored one, Redis restarted or failed over
+// and its queues can no longer be trusted, so every queued message goes
+// back to pending and the relay publishes it again.
+//
+// Both steps run in one transaction, so a crash cannot record the new id
+// without the reset. When several workers call this at the same time, the
+// row lock on system_state makes exactly one of them do the reset.
+func (s *Store) SyncRedisInstance(ctx context.Context, runID string) (requeued int64, changed bool, err error) {
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO system_state (key, value) VALUES ('redis_run_id', $1)
+			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+			WHERE system_state.value IS DISTINCT FROM EXCLUDED.value`, runID)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		changed = true
+		tag, err = tx.Exec(ctx, `
+			UPDATE messages SET status = 'pending', next_attempt_at = now(), updated_at = now()
+			WHERE status = 'queued'`)
+		requeued = tag.RowsAffected()
+		return err
+	})
+	return requeued, changed, err
 }
 
 // RequeueStuckSending retries messages whose worker claimed them but never
@@ -247,14 +265,4 @@ func (s *Store) PendingCounts(ctx context.Context) (express, normal int64, err e
 		SELECT count(*) FILTER (WHERE express), count(*) FILTER (WHERE NOT express)
 		FROM messages WHERE status = 'pending'`).Scan(&express, &normal)
 	return express, normal, err
-}
-
-// SwapState stores value under key and reports whether it changed. Only one
-// of several concurrent callers with the same new value sees changed=true.
-func (s *Store) SwapState(ctx context.Context, key, value string) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO system_state (key, value) VALUES ($1, $2)
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-		WHERE system_state.value IS DISTINCT FROM EXCLUDED.value`, key, value)
-	return tag.RowsAffected() == 1, err
 }
