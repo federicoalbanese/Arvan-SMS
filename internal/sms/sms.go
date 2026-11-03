@@ -78,6 +78,16 @@ type NewMessage struct {
 	IdempotencyKey string
 }
 
+// Transaction is one entry of a customer's balance ledger.
+type Transaction struct {
+	ID           int64
+	Kind         string // "topup", "charge" or "refund"
+	Amount       int64  // positive = credit, negative = debit
+	BalanceAfter int64
+	MessageCount int
+	CreatedAt    time.Time
+}
+
 // MessageFilter selects messages for the report endpoints.
 type MessageFilter struct {
 	CustomerID int64
