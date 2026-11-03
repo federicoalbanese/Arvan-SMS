@@ -1,0 +1,92 @@
+# Local environment: PostgreSQL, Redis, the API and two worker instances.
+#
+#   docker compose up -d --build
+#   curl localhost:8080/healthz
+
+x-app-env: &app-env
+  DATABASE_URL: postgres://sms:sms@postgres:5432/sms?sslmode=disable&pool_max_conns=20
+  REDIS_ADDR: redis:6379
+  LOG_LEVEL: info
+  EXPRESS_SLA: 5s
+  OPERATOR_LATENCY: 50ms
+  OPERATOR_FAILURE_RATE: "0.02"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sms
+      POSTGRES_PASSWORD: sms
+      POSTGRES_DB: sms
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sms -d sms"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    # AOF persistence: on restart Redis reloads its queues (losing at most
+    # ~1s of writes). The reconciler rebuilds the queues from Postgres anyway.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    image: sms-gateway:local
+    command: ["/app/api"]
+    environment:
+      <<: *app-env
+      HTTP_ADDR: ":8080"
+    ports:
+      - "${API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    image: sms-gateway:local
+    command: ["/app/worker"]
+    environment:
+      <<: *app-env
+      METRICS_ADDR: ":9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: 2
+    # Give workers time to finish the batch they are sending.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
