@@ -1,0 +1,11 @@
+# Build output
+/bin/
+
+# Test and coverage output
+*.out
+coverage.*
+
+# Local environment and editor files
+.env
+.idea/
+.vscode/
